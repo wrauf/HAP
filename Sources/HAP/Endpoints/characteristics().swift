@@ -1,15 +1,29 @@
 import Foundation
 import HKDF
-import func Evergreen.getLogger
+import Logging
+import HTTP
 
-fileprivate let logger = getLogger("hap.endpoints.characteristics")
+fileprivate let logger = Logger(label: "hap.endpoints.characteristics")
 
-func characteristics(device: Device) -> Application {
-    return { (connection, request) in
+// swiftlint:disable:next cyclomatic_complexity
+func characteristics(device: Device) -> Responder {
+    return { context, request in
+        let channel = context.channel
+        var response: HTTPResponse?
+        DispatchQueue.main.sync {
+            response = characteristics(device: device, channel: channel, request: request)
+        }
+        return response!
+    }
+}
+
+// swiftlint:disable:next cyclomatic_complexity
+func characteristics(device: Device, channel: Channel, request: HTTPRequest) -> HTTPResponse {
+
         switch request.method {
-        case "GET":
+        case .GET:
             guard
-                let queryItems = request.urlComponents.queryItems,
+                let queryItems = URLComponents(url: request.url, resolvingAgainstBaseURL: true)?.queryItems,
                 let query = try? Protocol.GetQuery(queryItems: queryItems)
             else {
                 return .badRequest
@@ -17,13 +31,28 @@ func characteristics(device: Device) -> Application {
 
             var responses = [Protocol.Characteristic]()
             for path in query.paths {
-                guard let characteristic = device.accessories.first(where: { $0.aid == path.aid })?.services.flatMap({ $0.characteristics.filter({ $0.iid == path.iid }) }).first else {
-                    responses.append(Protocol.Characteristic(aid: path.aid, iid: path.iid, status: .resourceDoesNotExist))
-                    continue
+                // TODO: change api to do something like this:
+                //     device.accessories[path.aid].characteristics[path.iid]
+                // or maybe:
+                //     device.characteristics[path]
+                guard let accessory = device.accessories.first(where: { $0.aid == path.aid }),
+                    // swiftlint:disable:next line_length
+                    let characteristic = accessory.services.flatMap({ $0.characteristics.filter({ $0.iid == path.iid }) }).first
+                    else {
+                        responses.append(Protocol.Characteristic(aid: path.aid,
+                                                                 iid: path.iid,
+                                                                 status: .resourceDoesNotExist))
+                        continue
                 }
                 guard characteristic.permissions.contains(.read) else {
                     logger.info("\(characteristic) has no read permission")
                     responses.append(Protocol.Characteristic(aid: path.aid, iid: path.iid, status: .writeOnly))
+                    continue
+                }
+                guard accessory.reachable else {
+                    responses.append(Protocol.Characteristic(aid: path.aid,
+                                                             iid: path.iid,
+                                                             status: .unableToCommunicate))
                     continue
                 }
 
@@ -31,10 +60,15 @@ func characteristics(device: Device) -> Application {
                 switch characteristic.getValue() {
                 case let _value as Double: value = .double(_value)
                 case let _value as Float: value = .double(Double(_value))
+                case let _value as UInt8: value = .int(Int(_value))
+                case let _value as UInt16: value = .int(Int(_value))
+                case let _value as UInt32: value = .int(Int(_value))
                 case let _value as Int: value = .int(_value)
                 case let _value as Bool: value = .int(_value ? 1 : 0)
                 case let _value as String: value = .string(_value)
-                default: value = nil
+                default:
+                    value = nil
+                    logger.error("Characteristic \(characteristic.description ?? "") has unsupported type: \(type(of: characteristic))")
                 }
 
                 var response = Protocol.Characteristic(aid: path.aid, iid: path.iid, value: value)
@@ -70,40 +104,44 @@ func characteristics(device: Device) -> Application {
              a non-zero "status" entry and must not contain a "value" entry.
              */
 
-            var responseStatus: Response.Status = .ok
+            var responseStatus: HTTPResponseStatus = .ok
             if !responses.filter({ $0.status != nil }).isEmpty {
-                for i in responses.indices where responses[i].status == nil {
-                    responses[i].status = .success
+                for index in responses.indices where responses[index].status == nil {
+                    responses[index].status = .success
                 }
                 responseStatus = .multiStatus
             }
 
             do {
                 let json = try JSONEncoder().encode(Protocol.CharacteristicContainer(characteristics: responses))
-                return Response(status: responseStatus, data: json, mimeType: "application/hap+json")
+                return HTTPResponse(status: responseStatus,
+                                    headers: HTTPHeaders([
+                                        ("Content-Type", "application/hap+json")
+                                    ]),
+                                    body: json)
             } catch {
-                logger.error("Could not serialize object", error: error)
+                logger.error("Could not serialize object: \(error)")
                 return .internalServerError
             }
 
-        case "PUT":
-            var body = Data()
+        case .PUT:
             guard
-                let _  = try? request.readAllData(into: &body),
-                let decoded = try? JSONDecoder().decode(Protocol.CharacteristicContainer.self, from: body) else
-            {
+                let body = request.body.data,
+                let decoded = try? JSONDecoder().decode(Protocol.CharacteristicContainer.self, from: body)
+            else {
                     logger.warning("Could not decode JSON")
                     return .badRequest
             }
+            logger.debug("PUT data: \(String(bytes: body, encoding: .utf8))")
             var statuses = [Protocol.Characteristic]()
             for item in decoded.characteristics {
                 var status = Protocol.Characteristic(aid: item.aid, iid: item.iid)
-                guard let characteristic = device.accessories
-                    .first(where: {$0.aid == item.aid})?
-                    .services
-                    .flatMap({$0.characteristics.filter({$0.iid == item.iid})})
-                    .first else {
-                    return .unprocessableEntity
+                guard let accessory = device.accessories.first(where: { $0.aid == item.aid }),
+                    let characteristic = accessory
+                        .services
+                        .flatMap({ $0.characteristics.filter({ $0.iid == item.iid }) })
+                        .first else {
+                            return HTTPResponse(status: .unprocessableEntity)
                 }
 
                 // At least one of "value" or "ev" will be present in the characteristic write request object
@@ -118,16 +156,22 @@ func characteristics(device: Device) -> Application {
                         status.status = .readOnly
                         break VALUE  // continue and process other items
                     }
+                    guard accessory.reachable else {
+                        status.status = .unableToCommunicate
+                        break VALUE  // continue and process other items
+                    }
 
                     logger.debug("Setting \(characteristic) to new value \(value) (type: \(type(of: value)))")
                     do {
                         switch value {
                         case let .string(value):
-                            try characteristic.setValue(value, fromConnection: connection)
+                            try characteristic.setValue(value, fromChannel: channel)
                         case let .int(int):
-                            try characteristic.setValue(int, fromConnection: connection)
+                            try characteristic.setValue(int, fromChannel: channel)
                         case let .double(double):
-                            try characteristic.setValue(double, fromConnection: connection)
+                            try characteristic.setValue(double, fromChannel: channel)
+                        case let .bool(bool):
+                            try characteristic.setValue(bool, fromChannel: channel)
                         }
                         status.status = .success
                     } catch {
@@ -137,7 +181,7 @@ func characteristics(device: Device) -> Application {
                     }
 
                     // notify listeners
-                    device.notify(characteristicListeners: characteristic, exceptListener: connection)
+                    device.fireCharacteristicChangeEvent(characteristic, source: channel)
                 }
 
                 // toggle events for this characteristic on this connection
@@ -148,10 +192,10 @@ func characteristics(device: Device) -> Application {
                         break
                     }
                     if events {
-                        device.add(characteristic: characteristic, listener: connection)
+                        device.addSubscriber(channel, forCharacteristic: characteristic)
                         logger.debug("Added listener for \(characteristic)")
                     } else {
-                        device.remove(characteristic: characteristic, listener: connection)
+                        device.removeSubscriber(channel, forCharacteristic: characteristic)
                         logger.debug("Removed listener for \(characteristic)")
                     }
                     status.status = .success
@@ -175,20 +219,24 @@ func characteristics(device: Device) -> Application {
             guard !hasErrors else {
                 do {
                     let json = try JSONEncoder().encode(Protocol.CharacteristicContainer(characteristics: statuses))
-                    return Response(status: statuses.count == 1 ? .badRequest : .multiStatus, data: json, mimeType: "application/hap+json")
+                    return HTTPResponse(status: statuses.count == 1 ? .badRequest : .multiStatus,
+                                        headers: HTTPHeaders([
+                                            ("Content-Type", "application/hap+json")
+                                        ]),
+                                        body: json)
                 } catch {
-                    logger.error("Could not serialize object", error: error)
+                    logger.error("Could not serialize object: \(error)")
                     return .internalServerError
                 }
             }
 
             /* HAP Specification 5.7.2.2
-             If no error occurs, the accessory must send an HTTP response with a 204 No Content status code and an empty body.
+             If no error occurs, the accessory must send an HTTP response with
+             a 204 No Content status code and an empty body.
              */
-            return Response(status: .noContent)
+            return .noContent
 
         default:
             return .badRequest
         }
-    }
 }

@@ -2,4 +2,5 @@
 /Packages
 /.build
 Switch
-Package.pins
+Package.resolved
+/configuration.json

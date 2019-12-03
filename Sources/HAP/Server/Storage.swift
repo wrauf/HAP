@@ -1,107 +1,53 @@
+import COperatingSystem
 import Foundation
 
 public protocol Storage: class {
-    subscript(key: String) -> Data? { get set }
-    func removeAll() throws
-    var keys: [String] { get }
-}
-
-public class PrefixedKeyStorage: Storage {
-    let prefix: String
-    let backing: Storage
-    init(prefix: String, backing: Storage) {
-        self.prefix = prefix
-        self.backing = backing
-    }
-    public subscript(key: String) -> Data? {
-        get {
-            return backing["\(prefix)\(key)"]
-        }
-        set {
-            backing["\(prefix)\(key)"] = newValue
-        }
-    }
-    public func removeAll() throws {
-        keys.forEach {
-            backing["\(prefix)\($0)"] = nil
-        }
-    }
-    public var keys: [String] {
-        return backing.keys
-            .filter { $0.hasPrefix(prefix) }
-            .map { $0.replacingOccurrences(of: prefix, with: "") }
-    }
+    func read() throws -> Data
+    func write(_: Data) throws
 }
 
 public class FileStorage: Storage {
-    public enum Error: Swift.Error {
-        case couldNotCreateDirectory
+    let filename: String
+
+    /// Creates a new instance that will store the device configuration
+    /// at the given file path.
+    ///
+    /// - Parameter filename: path to the file
+    public init(filename: String) {
+        self.filename = filename
     }
 
-    let path: String
-
-    public init(path: String) throws {
-        if !FileManager.default.directoryExists(atPath: path) {
-            do {
-                try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: false, attributes: nil)
-            } catch {
-                throw Error.couldNotCreateDirectory
-            }
+    public func read() throws -> Data {
+        let fd = fopen(filename, "r")
+        if fd == nil { try throwError() }
+        try posix(fseek(fd, 0, COperatingSystem.SEEK_END))
+        let size = ftell(fd)
+        rewind(fd)
+        var buffer = Data(count: size)
+        _ = buffer.withUnsafeMutableBytes {
+            COperatingSystem.fread($0, size, 1, fd)
         }
-        self.path = path
+        fclose(fd)
+        return buffer
     }
 
-    public subscript(key: String) -> Data? {
-        get {
-            let entityPath = URL(fileURLWithPath: path).appendingPathComponent(key)
-            guard let data = try? Data(contentsOf: entityPath, options: []) else {
-                return nil
-            }
-            return data
+    public func write(_ newValue: Data) throws {
+        let fd = COperatingSystem.fopen(filename, "w")
+        _ = newValue.withUnsafeBytes {
+            COperatingSystem.fwrite($0, newValue.count, 1, fd)
         }
-        set {
-            let entityURL = URL(fileURLWithPath: path).appendingPathComponent(key)
-            do {
-                if let newValue = newValue {
-                    try newValue.write(to: entityURL)
-                } else if FileManager.default.fileExists(atPath: entityURL.path) {
-                    try FileManager.default.removeItem(at: entityURL)
-                }
-            } catch {
-                fatalError("Could not write to storage: \(error)")
-            }
-        }
-    }
-
-    public func removeAll() throws {
-        for file in try FileManager.default.contentsOfDirectory(atPath: path) {
-            try FileManager.default.removeItem(atPath: "\(path)/\(file)")
-        }
-    }
-
-    public var keys: [String] {
-        do {
-            return try FileManager.default.contentsOfDirectory(atPath: path)
-        } catch {
-            fatalError("Could not get keys: \(error)")
-        }
+        fclose(fd)
     }
 }
 
 public class MemoryStorage: Storage {
-    var memory = [String: Data]()
-    public subscript(key: String) -> Data? {
-        get {
-            return memory[key]
-        }
-        set {
-            memory[key] = newValue
-        }
+    var memory = Data()
+
+    public func read() throws -> Data {
+        return memory
     }
-    public func removeAll() throws {
-        memory = [:]
-    }
-    public var keys: [String] {
-        return Array(memory.keys)
+
+    public func write(_ newValue: Data) throws {
+        memory = newValue
     }
 }

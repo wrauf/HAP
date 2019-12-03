@@ -1,45 +1,95 @@
 import Foundation
 
-typealias PairTagTLV8 = [PairTag: Data]
+typealias PairTagTLV8Tuple = (PairTag, Data)
+typealias PairTagTLV8 = [PairTagTLV8Tuple]
 
-enum TLV8Error: Swift.Error {
-    case UnknownKey(UInt8)
-    case DecodeError
+extension Array where Element == PairTagTLV8Tuple {
+    subscript(index: PairTag) -> Data? {
+        return self.first(where: { $0.0 == index })?.1
+    }
+
+    var pairStep: PairStep? {
+        return self
+            .first(where: { $0.0 == PairTag.state })?.1
+            .first
+            .flatMap({ PairStep(rawValue: $0) })
+    }
+
+    var pairSetupStep: PairSetupStep? {
+        return self
+            .first(where: { $0.0 == PairTag.state })?.1
+            .first
+            .flatMap({ PairSetupStep(rawValue: $0) })
+    }
+
+    var error: PairError? {
+        return self
+            .first(where: { $0.0 == PairTag.error })?.1
+            .first
+            .flatMap({ PairError(rawValue: $0) })
+    }
+
+    static func == (lhs: [PairTagTLV8Tuple], rhs: [PairTagTLV8Tuple]) -> Bool {
+        return lhs.elementsEqual(rhs, by: ==)
+    }
 }
 
-func decode<Key: Hashable>(_ data: Data) throws -> [Key: Data] where Key: RawRepresentable, Key.RawValue == UInt8 {
-    var result = [Key: Data]()
+// Requires Swift 4.1 -- conditional conformance.
+//extension Array: ExpressibleByDictionaryLiteral where Element == PairTagTLV8Tuple {
+//}
+//extension Array: Equatable where Element == PairTagTLV8Tuple {
+//}
+
+enum TLV8Error: Swift.Error {
+    case unknownKey(UInt8)
+    case decodeError
+}
+
+func decode<Key>(_ data: Data) throws -> [(Key, Data)] where Key: RawRepresentable, Key.RawValue == UInt8 {
+    var result = [(Key, Data)]()
     var index = data.startIndex
+    var currentType: Key?
+    var currentValue: Data?
+
     while index < data.endIndex {
         guard let type = Key(rawValue: data[index]) else {
-            throw TLV8Error.UnknownKey(data[index])
+            throw TLV8Error.unknownKey(data[index])
         }
         index = data.index(after: index)
 
         let length = Int(data[index])
         index = data.index(after: index)
 
-        guard let endIndex = data.index(index, offsetBy: length, limitedBy: data.endIndex) else { throw TLV8Error.DecodeError }
+        guard let endIndex = data.index(index, offsetBy: length, limitedBy: data.endIndex) else {
+            throw TLV8Error.decodeError
+        }
         let value = data[index..<endIndex]
 
-        if let append = result[type] {
-            result[type] = append + Data(bytes: Array(value))
+        if currentType == nil || type != currentType! {
+            if let currentType = currentType, let currentValue = currentValue {
+                result.append((currentType, currentValue))
+            }
+            currentType = type
+            currentValue = Data(bytes: Array(value))
         } else {
-            result[type] = Data(bytes: Array(value))
+            currentValue! += Data(bytes: Array(value))
         }
 
         index = endIndex
     }
+    if let currentType = currentType, let currentValue = currentValue {
+        result.append((currentType, currentValue))
+    }
     return result
 }
 
-func encode<Key>(_ data: [Key: Data]) -> Data where Key: RawRepresentable, Key.RawValue == UInt8 {
+func encode<Key>(_ array: [(Key, Data)]) -> Data where Key: RawRepresentable, Key.RawValue == UInt8 {
     var result = Data()
     func append(type: UInt8, value: Data.SubSequence) {
         result.append(Data(bytes: [type, UInt8(value.count)] + value))
     }
 
-    for (type, value) in data {
+    for (type, value) in array {
         var index = value.startIndex
         repeat {
             if let endIndex = value.index(index, offsetBy: 255, limitedBy: value.endIndex) {
@@ -54,16 +104,48 @@ func encode<Key>(_ data: [Key: Data]) -> Data where Key: RawRepresentable, Key.R
     return result
 }
 
+// Pair Setup State
 enum PairSetupStep: UInt8 {
-    case waiting = 0, startRequest, startResponse, verifyRequest, verifyResponse, keyExchangeRequest, keyExchangeResponse
+    case waiting = 0
+
+    // M1: iOS Device -> Accessory -- `SRP Start Request'
+    case startRequest = 1
+
+    // M2: Accessory -> iOS Device -- `SRP Start Response'
+    case startResponse = 2
+
+    // M3: iOS Device -> Accessory -- `SRP Verify Request'
+    case verifyRequest = 3
+
+    // M4: Accessory -> iOS Device -- `SRP Verify Response'
+    case verifyResponse = 4
+
+    // M5: iOS Device -> Accessory -- `Exchange Request'
+    case keyExchangeRequest = 5
+
+    // M6: Accessory -> iOS Device -- `Exchange Response'
+    case keyExchangeResponse = 6
 }
 
+// Pair Verification State
 enum PairVerifyStep: UInt8 {
-    case waiting = 0, startRequest, startResponse, finishRequest, finishResponse
+    case waiting = 0
+
+    // M1: iOS Device -> Accessory -- `Verify Start Request'
+    case startRequest = 1
+
+    // M2: Accessory -> iOS Device -- `Verify Start Response'
+    case startResponse = 2
+
+    // M3: iOS Device -> Accessory -- `Verify Finish Request'
+    case finishRequest = 3
+
+    // M4: Accessory -> iOS Device -- `Verify Finish Response'
+    case finishResponse = 4
 }
 
 enum PairTag: UInt8 {
-    // Method to use for pairing. See Table 4-4 (page 60).
+    // TLV Types. See Table 4-6 (page 61).
     case pairingMethod = 0x00
 
     // Identifier for authentication. (UTF-8)
@@ -113,6 +195,7 @@ enum PairTag: UInt8 {
 }
 
 enum PairingMethod: UInt8 {
+    // Method to use for pairing. See Table 4-4 (page 60).
     case `default` = 0 // TODO: according to specs, 0 is 'reserved'
     case pairSetup = 1
     case pairVerify = 2
@@ -126,6 +209,7 @@ enum PairStep: UInt8 {
     case response = 0x02
 }
 
+// Error Codes. See Table 4-5 (page 60).
 enum PairError: UInt8 {
     // Generic error to handle unexpected errors.
     case unknown = 0x01
@@ -148,4 +232,15 @@ enum PairError: UInt8 {
 
     // Server is busy and cannot accept a pairing request at this time.
     case busy = 0x07
+}
+
+import Foundation
+import HTTP
+
+extension HTTPResponse {
+    init(tags: PairTagTLV8) {
+        self.init(status: .ok,
+                  headers: HTTPHeaders([("Content-Type", "application/pairing+tlv8")]),
+                  body: encode(tags))
+    }
 }

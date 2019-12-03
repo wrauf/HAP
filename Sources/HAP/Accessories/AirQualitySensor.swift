@@ -8,16 +8,7 @@ extension Accessory {
     }
 }
 
-public enum AirQuality: Int, CharacteristicValueType {
-    case unknown = 0, excellent, good, fair, inferior, poor
-}
-
 extension Service {
-    open class AirQualitySensor: Service {
-        public let airQuality = GenericCharacteristic<AirQuality>(type: .airQuality, permissions: [.read, .events])
-
-        public init() {
-            super.init(type: .airQualitySensor, characteristics: [airQuality])
-        }
+    open class AirQualitySensor: AirQualitySensorBase {
     }
 }

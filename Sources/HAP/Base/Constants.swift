@@ -1,44 +1,62 @@
-public enum CharacteristicType: String, Codable {
-    case on = "25"
-    case brightness = "8"
-    case saturation = "2F"
-    case hue = "13"
-    case currentHumidity = "10"
-    case currentTemperature = "11"
-    case targetTemperature = "35"
-    case currentHeatingCoolingState = "F"
-    case targetHeatingCoolingState =  "33"
-    case temperatureDisplayUnits = "36"
-    case identify = "14"
-    case manufacturer = "20"
-    case model = "21"
-    case name = "23"
-    case serialNumber = "30"
-    case currentPosition = "6D"
-    case positionState = "72"
-    case targetPosition = "7C"
-    case airQuality = "95"
-    case batteryLevel = "68"
-    case chargingState = "8F"
-    case statusLowBattery = "79"
-    case configureBridgedAccessoryStatus = "9D"
-    case discoverBridgedAccessories = "9E"
-    case discoveredBridgedAccessories = "9F"
-    case configureBridgedAccessory = "A0"
-    case reachable = "63"
-    case linkQuality = "9C"
-    case accessoryIdentifier = "57"
-    case category = "A3"
-    case outletInUse = "26"
-    case currentDoorState = "E"
-    case targetDoorState = "32"
-    case obstructionDetected = "24"
-    case lockCurrentState = "1D"
-    case lockTargetState = "1E"
-    case securitySystemCurrentState = "66"
-    case securitySystemTargetState = "67"
-    case lightLevel = "6B"
-    case firmwareRevision = "52"
+import Foundation
+
+public enum CharacteristicType: Codable, Equatable {
+
+    case appleDefined(UInt32)
+    case custom(UUID)
+
+    init(_ hex: UInt32) {
+        self = .appleDefined(hex)
+    }
+
+    public init(_ uuid: UUID) {
+        self = .custom(uuid)
+    }
+
+    var rawValue: String {
+        switch self {
+        case let .appleDefined(value):
+            return String(value, radix: 16)
+        case let .custom(uuid):
+            return uuid.uuidString
+        }
+    }
+
+    public static func == (lhs: CharacteristicType, rhs: CharacteristicType) -> Bool {
+        switch (lhs, rhs) {
+        case (let .appleDefined(left), let .appleDefined(right)):
+            return left == right
+        case (let .custom(left), let .custom(right)):
+            return left == right
+        default:
+            return false
+        }
+    }
+
+    enum DecodeError: Error {
+        case unsupportedValueType
+        case malformedUUIDString
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let string = try? container.decode(String.self) {
+            if let int = UInt32(string) {
+                self = .appleDefined(int)
+            } else if let uuid = UUID(uuidString: string) {
+                self = .custom(uuid)
+            } else {
+                throw DecodeError.malformedUUIDString
+            }
+        } else {
+            throw DecodeError.unsupportedValueType
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 }
 
 public enum CharacteristicPermission: String, Codable {
@@ -62,32 +80,13 @@ public enum CharacteristicPermission: String, Codable {
     // This characteristic is hidden from the user
     case hidden = "hd"
 
+    case writeResponse = "wr"
+
     // Short-hand for "all" permissions.
     static let ReadWrite: [CharacteristicPermission] = [.read, .write, .events]
 }
 
-public enum CharacteristicFormat: String, Codable {
-    case string
-    case bool
-    case float
-    case uint8
-    case uint16
-    case uint32
-    case int32
-    case uint64
-    case data
-    case tlv8
-}
-
-public enum CharacteristicUnit: String, Codable {
-    case percentage
-    case arcdegrees
-    case celcius
-    case lux
-    case seconds
-}
-
-public enum HAPStatusCodes: Int, Codable {
+enum HAPStatusCodes: Int, Codable {
     case success = 0
     case insufficientPrivileges = -70401
     case unableToCommunicate = -70402

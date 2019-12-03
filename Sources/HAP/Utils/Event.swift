@@ -1,11 +1,17 @@
+// swiftlint:disable unused_optional_binding
 import Foundation
+import HTTP
 
 struct Event {
-    var status: Response.Status
+    enum Error: Swift.Error {
+        case characteristicWithoutAccessory
+    }
+
+    var status: HTTPResponseStatus
     var body: Data
     var headers: [String: String] = [:]
 
-    init(status: Response.Status, body: Data, mimeType: String) {
+    init(status: HTTPResponseStatus, body: Data, mimeType: String) {
         self.status = status
         self.body = body
         headers["Content-Length"] = "\(body.count)"
@@ -20,14 +26,13 @@ struct Event {
         guard
             let _ = scanner.scan("EVENT/1.0 "),
             let statusCode = scanner.scanUpTo(" ").flatMap({ Int($0) }),
-            let status = Response.Status(rawValue: statusCode),
             let _ = scanner.scan(space),
             let _ = scanner.scanUpTo("\r\n"),
             let _ = scanner.scan(newline)
             else {
                 return nil
         }
-        self.status = status
+        self.status = HTTPResponseStatus(statusCode: statusCode)
         while true {
             if let _ = scanner.scan(newline) {
                 break
@@ -47,23 +52,17 @@ struct Event {
 
     func serialized() -> Data {
         // @todo should set additional headers here as well?
-        let headers = self.headers.map({ "\($0): \($1)\r\n" }).joined(separator: "")
-        return "EVENT/1.0 \(status.rawValue) \(status.description)\r\n\(headers)\r\n".data(using: .utf8)! + body
-    }
-}
-
-extension Event {
-    enum Error: Swift.Error {
-        case characteristicWithoutAccessory
+        let headers = self.headers.map({ "\($0): \($1)\r\n" }).joined()
+        return "EVENT/1.0 \(status.code) \(status.reasonPhrase)\r\n\(headers)\r\n".data(using: .utf8)! + body
     }
 
     init(valueChangedOfCharacteristics characteristics: [Characteristic]) throws {
         var payload = [[String: Any]]()
-        for c in characteristics {
-            guard let aid = c.service?.accessory?.aid else {
+        for char in characteristics {
+            guard let aid = char.service?.accessory?.aid else {
                 throw Error.characteristicWithoutAccessory
             }
-            payload.append(["aid": aid, "iid": c.iid, "value": c.getValue() ?? NSNull()])
+            payload.append(["aid": aid, "iid": char.iid, "value": char.getValue() ?? NSNull()])
         }
         let serialized = ["characteristics": payload]
         guard let body = try? JSONSerialization.data(withJSONObject: serialized, options: []) else {

@@ -1,9 +1,9 @@
-import func Evergreen.getLogger
+import Logging
 import Foundation
 import HKDF
 import SRP
 
-fileprivate let logger = getLogger("hap.controllers.pair-setup")
+fileprivate let logger = Logger(label: "hap.controllers.pair-setup")
 
 class PairSetupController {
     struct Session {
@@ -16,6 +16,10 @@ class PairSetupController {
         case couldNotDecodeMessage
         case couldNotSign
         case couldNotEncrypt
+        case alreadyPaired
+        case alreadyPairing
+        case invalidSetupState
+        case authenticationFailed
     }
 
     let device: Device
@@ -32,6 +36,28 @@ class PairSetupController {
             throw Error.invalidPairingMethod
         }
 
+        // If the accessory is already paired it must respond with
+        // Error_Unavailable
+        if device.pairingState == .paired {
+            throw Error.alreadyPaired
+        }
+
+        // If the accessory has received more than 100 unsuccessful
+        // authentication attempts it must respond with
+        // Error_MaxTries
+        // TODO
+
+        // If the accessory is currently performing a Pair Setup operation with
+        // a different controller it must respond with
+        // Error_Busy
+        if device.pairingState == .pairing {
+            throw Error.alreadyPairing
+        }
+
+        // Notify listeners of the pairing event and record the paring state
+        // swiftlint:disable:next force_try
+        try! device.changePairingState(.pairing)
+
         let (salt, serverPublicKey) = session.server.getChallenge()
 
         logger.info("Pair setup started")
@@ -39,37 +65,34 @@ class PairSetupController {
         logger.debug("<-- B \(serverPublicKey.hex)")
 
         let result: PairTagTLV8 = [
-            .state: Data(bytes: [PairSetupStep.startResponse.rawValue]),
-            .publicKey: serverPublicKey,
-            .salt: salt
-            ]
+            (.state, Data(bytes: [PairSetupStep.startResponse.rawValue])),
+            (.publicKey, serverPublicKey),
+            (.salt, salt)
+        ]
         return result
     }
 
-    func verifyRequest(_ data: PairTagTLV8, _ session: Session) -> PairTagTLV8? {
+    func verifyRequest(_ data: PairTagTLV8, _ session: Session) throws -> PairTagTLV8? {
         guard let clientPublicKey = data[.publicKey], let clientKeyProof = data[.proof] else {
             logger.warning("Invalid parameters")
-            return nil
+            throw Error.invalidSetupState
         }
 
         logger.debug("--> A \(clientPublicKey.hex)")
         logger.debug("--> M \(clientKeyProof.hex)")
 
         guard let serverKeyProof = try? session.server.verifySession(publicKey: clientPublicKey,
-                                                                     keyProof: clientKeyProof) else {
-            logger.warning("Invalid PIN")
-            let result: PairTagTLV8 = [
-                .state: Data(bytes: [PairSetupStep.verifyResponse.rawValue]),
-                .error: Data(bytes: [PairError.authenticationFailed.rawValue])
-            ]
-            return result
+                                                                     keyProof: clientKeyProof)
+            else {
+                logger.warning("Invalid PIN")
+                throw Error.authenticationFailed
         }
 
         logger.debug("<-- HAMK \(serverKeyProof.hex)")
 
         let result: PairTagTLV8 = [
-            .state: Data(bytes: [PairSetupStep.verifyResponse.rawValue]),
-            .proof: serverKeyProof
+            (.state, Data(bytes: [PairSetupStep.verifyResponse.rawValue])),
+            (.proof, serverKeyProof)
         ]
         return result
     }
@@ -95,8 +118,11 @@ class PairSetupController {
             throw Error.couldNotDecodeMessage
         }
 
-        guard let publicKey = data[.publicKey], let username = data[.identifier], let signatureIn = data[.signature] else {
-            throw Error.invalidParameters
+        guard let publicKey = data[.publicKey],
+            let username = data[.identifier],
+            let signatureIn = data[.signature]
+            else {
+                throw Error.invalidParameters
         }
 
         logger.debug("--> identifier \(String(data: username, encoding: .utf8)!)")
@@ -108,13 +134,10 @@ class PairSetupController {
                                info: "Pair-Setup-Controller-Sign-Info".data(using: .utf8),
                                salt: "Pair-Setup-Controller-Sign-Salt".data(using: .utf8),
                                count: 32) +
-            username +
-            publicKey
+                     username +
+                     publicKey
 
         try Ed25519.verify(publicKey: publicKey, message: hashIn, signature: signatureIn)
-
-        // At this point, the pairing has completed.
-        device.pairings[username] = publicKey
 
         let hashOut = deriveKey(algorithm: .sha512,
                                 seed: session.server.sessionKey!,
@@ -129,9 +152,9 @@ class PairSetupController {
         }
 
         let resultInner: PairTagTLV8 = [
-            .identifier: device.identifier.data(using: .utf8)!,
-            .publicKey: device.publicKey,
-            .signature: signatureOut
+            (.identifier, device.identifier.data(using: .utf8)!),
+            (.publicKey, device.publicKey),
+            (.signature, signatureOut)
         ]
 
         logger.debug("<-- identifier \(self.device.identifier)")
@@ -139,13 +162,19 @@ class PairSetupController {
         logger.debug("<-- signature \(signatureOut.hex)")
         logger.info("Pair setup completed")
 
-        guard let encryptedResultInner = try? ChaCha20Poly1305.encrypt(message: encode(resultInner), nonce: "PS-Msg06".data(using: .utf8)!, key: encryptionKey) else {
-            throw Error.couldNotEncrypt
+        guard let encryptedResultInner = try? ChaCha20Poly1305.encrypt(message: encode(resultInner),
+                                                                       nonce: "PS-Msg06".data(using: .utf8)!,
+                                                                       key: encryptionKey)
+            else {
+                throw Error.couldNotEncrypt
         }
 
+        // At this point, the pairing has completed. The first controller is granted admin role.
+        device.add(pairing: Pairing(identifier: username, publicKey: publicKey, role: .admin))
+
         let resultOuter: PairTagTLV8 = [
-            .state: Data(bytes: [PairSetupStep.keyExchangeResponse.rawValue]),
-            .encryptedData: encryptedResultInner
+            (.state, Data(bytes: [PairSetupStep.keyExchangeResponse.rawValue])),
+            (.encryptedData, encryptedResultInner)
         ]
         return resultOuter
     }

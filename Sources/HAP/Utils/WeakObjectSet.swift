@@ -19,7 +19,7 @@ class WeakObject<T: AnyObject>: Equatable, Hashable {
     }
 }
 
-struct WeakObjectSet<T: AnyObject> where T: Hashable {
+struct WeakObjectSet<T: AnyObject>: Sequence, ExpressibleByArrayLiteral where T: Hashable {
     var objects: Set<WeakObject<T>>
 
     init() {
@@ -31,7 +31,7 @@ struct WeakObjectSet<T: AnyObject> where T: Hashable {
     }
 
     var allObjects: [T] {
-        return objects.flatMap { $0.object }
+        return objects.compactMap { $0.object }
     }
 
     func contains(object: T) -> Bool {
@@ -39,25 +39,35 @@ struct WeakObjectSet<T: AnyObject> where T: Hashable {
     }
 
     mutating func addObject(object: T) {
+        cleanup()
         self.objects.formUnion([WeakObject(object)])
     }
 
     mutating func addObjects(objects: [T]) {
+        cleanup()
         self.objects.formUnion(objects.map { WeakObject($0) })
     }
 
     mutating func remove(_ member: T) -> T? {
+        cleanup()
         return self.objects.remove(WeakObject(member))?.object
     }
-}
 
-extension WeakObjectSet: Sequence {
+    mutating func cleanup() {
+        objects = objects.filter { $0.object != nil }
+    }
+
+    /// Complexity: O(n)
+    var isEmpty: Bool {
+        return allObjects.isEmpty
+    }
+
+    // Sequence
     func makeIterator() -> IndexingIterator<[T]> {
         return allObjects.makeIterator()
     }
-}
 
-extension WeakObjectSet: ExpressibleByArrayLiteral {
+    // ExpressibleByArrayLiteral
     init(arrayLiteral elements: T...) {
         self.objects = Set(elements.map { WeakObject($0) })
     }

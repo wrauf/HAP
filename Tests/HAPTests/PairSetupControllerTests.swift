@@ -1,3 +1,4 @@
+// swiftlint:disable force_try
 @testable import HAP
 import HKDF
 import SRP
@@ -18,8 +19,15 @@ class PairSetupControllerTests: XCTestCase {
                                                                   password: password,
                                                                   group: .N3072,
                                                                   algorithm: .sha512)
-        let session = PairSetupController.Session(server: SRP.Server(username: "Pair-Setup", salt: salt, verificationKey: verificationKey, group: .N3072, algorithm: .sha512))
-        let device = Device(bridgeInfo: .init(name: "Test"), setupCode: password, storage: MemoryStorage(), accessories: [])
+        let session = PairSetupController.Session(server: SRP.Server(username: "Pair-Setup",
+                                                                     salt: salt,
+                                                                     verificationKey: verificationKey,
+                                                                     group: .N3072,
+                                                                     algorithm: .sha512))
+        let device = Device(bridgeInfo: .init(name: "Test", serialNumber: "00080"),
+                            setupCode: .override(password),
+                            storage: MemoryStorage(),
+                            accessories: [])
         let controller = PairSetupController(device: device)
         let client = SRP.Client(username: "Pair-Setup", password: password, group: .N3072, algorithm: .sha512)
         let keys = Ed25519.generateSignKeypair()
@@ -28,19 +36,22 @@ class PairSetupControllerTests: XCTestCase {
         do {
             // Server -> Client: [salt, publicKey]
             let response = try! controller.startRequest([
-                .pairingMethod: Data(bytes: [PairingMethod.default.rawValue])
+                (.pairingMethod, Data(bytes: [PairingMethod.default.rawValue]))
             ], session)
-            XCTAssertEqual(response[.state]?.first, PairSetupStep.startResponse.rawValue)
+            XCTAssertEqual(response.pairSetupStep, PairSetupStep.startResponse)
             XCTAssertEqual(response[.publicKey], session.server.publicKey)
             XCTAssertEqual(response[.salt], salt)
-            clientKeyProof = try! client.processChallenge(salt: response[.salt]!, publicKey: response[.publicKey]!)
+            clientKeyProof = try! client.processChallenge(salt: response[.salt]!,
+                                                          publicKey: response[.publicKey]!)
         }
 
         do {
             // Client -> Server: [publicKey, keyProof]
-            let response = controller.verifyRequest([.publicKey: client.publicKey, .proof: clientKeyProof], session)
+            let response = try! controller.verifyRequest([(.publicKey, client.publicKey),
+                                                          (.proof, clientKeyProof)],
+                                                         session)
             XCTAssertNotNil(response)
-            XCTAssertEqual(response![.state]?.first, PairSetupStep.verifyResponse.rawValue)
+            XCTAssertEqual(response?.pairSetupStep, PairSetupStep.verifyResponse)
 
             // Server -> Client: [keyProof]
             let serverKeyProof = response![.proof]!
@@ -57,9 +68,9 @@ class PairSetupControllerTests: XCTestCase {
                 clientIdentifier +
                 keys.publicKey
             let request: PairTagTLV8 = [
-                .publicKey: keys.publicKey,
-                .identifier: clientIdentifier,
-                .signature: try! Ed25519.sign(privateKey: keys.privateKey, message: hashIn)
+                (.publicKey, keys.publicKey),
+                (.identifier, clientIdentifier),
+                (.signature, try! Ed25519.sign(privateKey: keys.privateKey, message: hashIn))
             ]
             let encryptionKey = deriveKey(algorithm: .sha512,
                                           seed: session.server.sessionKey!,
@@ -67,9 +78,9 @@ class PairSetupControllerTests: XCTestCase {
                                           salt: "Pair-Setup-Encrypt-Salt".data(using: .utf8),
                                           count: 32)
             let requestEncrypted: PairTagTLV8 = [
-                .encryptedData: try! ChaCha20Poly1305.encrypt(message: encode(request),
-                                                              nonce: "PS-Msg05".data(using: .utf8)!,
-                                                              key: encryptionKey)
+                (.encryptedData, try! ChaCha20Poly1305.encrypt(message: encode(request),
+                                                               nonce: "PS-Msg05".data(using: .utf8)!,
+                                                               key: encryptionKey))
             ]
             let responseEncrypted = try! controller.keyExchangeRequest(requestEncrypted, session)
 
@@ -88,7 +99,7 @@ class PairSetupControllerTests: XCTestCase {
             try! Ed25519.verify(publicKey: response[.publicKey]!, message: hashOut, signature: response[.signature]!)
         }
 
-        XCTAssertEqual(device.pairings[clientIdentifier], keys.publicKey)
+        XCTAssertEqual(device.get(pairingWithIdentifier: clientIdentifier)?.publicKey, keys.publicKey)
     }
 
     // from: https://oleb.net/blog/2017/03/keeping-xctest-in-sync/#appendix-code-generation-with-sourcery
@@ -98,7 +109,8 @@ class PairSetupControllerTests: XCTestCase {
             let linuxCount = thisClass.allTests.count
             let darwinCount = Int(thisClass
                 .defaultTestSuite.testCaseCount)
-            XCTAssertEqual(linuxCount, darwinCount,
+            XCTAssertEqual(linuxCount,
+                           darwinCount,
                            "\(darwinCount - linuxCount) tests are missing from allTests")
         #endif
     }

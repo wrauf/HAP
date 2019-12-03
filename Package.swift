@@ -1,4 +1,4 @@
-// swift-tools-version:4.0
+// swift-tools-version:4.2
 
 import PackageDescription
 
@@ -9,24 +9,35 @@ let package = Package(
         .executable(name: "hap-server", targets: ["hap-server"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/Bouke/CLibSodium.git", from: "1.0.0"),
-        .package(url: "https://github.com/Bouke/SRP.git", from: "3.0.1"),
-        .package(url: "https://github.com/Bouke/HKDF.git", from: "3.0.1"),
-        .package(url: "https://github.com/knly/Evergreen.git", .branch("swift4")),
-        .package(url: "https://github.com/Bouke/Kitura-net.git", from: "1.7.0"),
-        .package(url: "https://github.com/IBM-Swift/BlueSocket.git", from: "0.12.0"),
-        .package(url: "https://github.com/IBM-Swift/BlueCryptor.git", from: "0.8.16"),
-        .package(url: "https://github.com/Coder-256/Regex.git", .branch("swift4")),
+        .package(url: "https://github.com/Bouke/SRP.git", from: "3.1.0"),
+        .package(url: "https://github.com/Bouke/HKDF.git", from: "3.1.0"),
+        .package(url: "https://github.com/IBM-Swift/BlueCryptor.git", from: "1.0.21"),
+        .package(url: "https://github.com/crossroadlabs/Regex.git", from: "1.1.0"),
+        .package(url: "https://github.com/apple/swift-nio.git", from: "1.11.0"),
+        .package(url: "https://github.com/apple/swift-log.git", Version("0.0.0") ..< Version("2.0.0")),
     ],
     targets: [
-        .target(name: "HAP", dependencies: ["SRP", "Cryptor", "Evergreen", "HKDF", "Kitura-net", "Regex", "Socket"]),
-        .target(name: "hap-server", dependencies: ["HAP", "Evergreen"]),
+        .systemLibrary(name: "CLibSodium",
+                       pkgConfig: "libsodium",
+                       providers: [
+                           .brew(["libsodium"]),
+                           .apt(["libsodium-dev"])
+                       ]),
+        .target(name: "CQRCode"),
+        .target(name: "COperatingSystem"),
+        .target(name: "HTTP", dependencies: ["NIO", "NIOHTTP1", "NIOFoundationCompat", "COperatingSystem"]),
+        .target(name: "HAP", dependencies: ["SRP", "Cryptor", "Logging", "HKDF", "Regex", "CQRCode", "HTTP", "CLibSodium"]),
+        .target(name: "hap-server", dependencies: ["HAP", "Logging"]),
         .testTarget(name: "HAPTests", dependencies: ["HAP"]),
-    ],
-    swiftLanguageVersions: [4]
+    ]
 )
 
+#if os(macOS)
+    package.products.append(.executable(name: "hap-update", targets: ["HAPUpdate"]))
+    package.targets.append(.target(name: "HAPUpdate", dependencies: []))
+#endif
+
 #if os(Linux)
-    package.dependencies.append(.package(url: "https://github.com/Bouke/NetService.git", from: "0.3.0"))
-    package.targets[0].dependencies.append("NetService")
+    package.dependencies.append(.package(url: "https://github.com/Bouke/NetService.git", from: "0.7.0"))
+    package.targets.first(where: { $0.name == "HAP" })!.dependencies.append("NetService")
 #endif

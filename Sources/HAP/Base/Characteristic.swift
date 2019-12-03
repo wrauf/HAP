@@ -1,12 +1,25 @@
 import Foundation
+import NIO
+
+public struct AnyCharacteristic {
+    let wrapped: Characteristic
+
+    public init<T>(_ characteristic: GenericCharacteristic<T>) {
+        wrapped = characteristic
+    }
+
+    init(_ characteristic: Characteristic) {
+        wrapped = characteristic
+    }
+}
 
 protocol Characteristic: class, JSONSerializable {
-    weak var service: Service? { get set }
+    var service: Service? { get set }
     var iid: InstanceID { get set }
     var type: CharacteristicType { get }
     var permissions: [CharacteristicPermission] { get }
     func getValue() -> JSONValueType?
-    func setValue(_: Any?, fromConnection: Server.Connection?) throws
+    func setValue(_: Any?, fromChannel: Channel?) throws
     var description: String? { get }
     var format: CharacteristicFormat? { get }
     var unit: CharacteristicUnit? { get }
@@ -17,7 +30,7 @@ protocol Characteristic: class, JSONSerializable {
 }
 
 extension Characteristic {
-    public func serialized() -> [String: JSONValueType] {
+    func serialized() -> [String: JSONValueType] {
         var serialized: [String: JSONValueType] = [
             "iid": iid,
             "type": type.rawValue,
@@ -42,7 +55,7 @@ extension Characteristic {
     }
 }
 
-public class GenericCharacteristic<T: CharacteristicValueType>: Characteristic, JSONSerializable {
+public class GenericCharacteristic<T: CharacteristicValueType>: Characteristic, JSONSerializable, Hashable, Equatable {
     enum Error: Swift.Error {
         case valueTypeException
     }
@@ -58,10 +71,17 @@ public class GenericCharacteristic<T: CharacteristicValueType>: Characteristic, 
             return _value
         }
         set {
-            guard newValue != _value else { return }
-            _value = newValue
-            guard let device = service?.accessory?.device else { return }
-            device.notify(characteristicListeners: self)
+            guard newValue != _value else {
+                return
+            }
+            precondition(
+                !permissions.contains(.read) || newValue != nil,
+                "Readable characteristics should have non nil value")
+
+            _value = clip(value: newValue)
+            if let device = service?.accessory?.device {
+                device.fireCharacteristicChangeEvent(self)
+            }
         }
     }
 
@@ -69,21 +89,18 @@ public class GenericCharacteristic<T: CharacteristicValueType>: Characteristic, 
         return value?.jsonValueType
     }
 
-    func setValue(_ newValue: Any?, fromConnection connection: Server.Connection?) throws {
+    func setValue(_ newValue: Any?, fromChannel channel: Channel?) throws {
         switch newValue {
         case let some?:
             guard let newValue = T(value: some) else {
                 throw Error.valueTypeException
             }
-            _value = newValue
+            _value = clip(value: newValue)
         case .none:
             _value = nil
         }
-        _ = onValueChange.map { $0(_value) }
+        service?.characteristic(self, didChangeValue: _value)
     }
-
-    // Subscribe a listener to value changes from (remote) clients.
-    public var onValueChange: [(T?) -> Void] = []
 
     public let permissions: [CharacteristicPermission]
 
@@ -96,7 +113,20 @@ public class GenericCharacteristic<T: CharacteristicValueType>: Characteristic, 
     public var minValue: Double?
     public var minStep: Double?
 
-    public init(type: CharacteristicType, value: T? = nil, permissions: [CharacteristicPermission] = [.read, .write, .events], description: String? = nil, format: CharacteristicFormat? = nil, unit: CharacteristicUnit? = nil, maxLength: Int? = nil, maxValue: Double? = nil, minValue: Double? = nil, minStep: Double? = nil) {
+    public init(type: CharacteristicType,
+                value: T? = nil,
+                permissions: [CharacteristicPermission] = [.read, .write, .events],
+                description: String? = nil,
+                format: CharacteristicFormat? = nil,
+                unit: CharacteristicUnit? = nil,
+                maxLength: Int? = nil,
+                maxValue: Double? = nil,
+                minValue: Double? = nil,
+                minStep: Double? = nil) {
+        precondition(
+            !permissions.contains(.read) || value != nil,
+            "Readable characteristics should have non nil value")
+
         self.type = type
         self._value = value
         self.permissions = permissions
@@ -109,17 +139,31 @@ public class GenericCharacteristic<T: CharacteristicValueType>: Characteristic, 
         self.maxValue = maxValue
         self.minValue = minValue
         self.minStep = minStep
-    }
-}
 
-extension GenericCharacteristic: Hashable {
+        self._value = clip(value: value)
+    }
+
+    func clip(value: T?) -> T? {
+        if let unwrappedValue = value, let doubleValue = Double(value: unwrappedValue) {
+            if let unwrappedMinValue = minValue, doubleValue < unwrappedMinValue {
+                return T(value: unwrappedMinValue)!
+            }
+            if let unwrappedMaxValue = maxValue, doubleValue > unwrappedMaxValue {
+                return T(value: unwrappedMaxValue)!
+            }
+        }
+        return value
+    }
+
     public var hashValue: Int {
         return iid.hashValue
     }
-}
 
-extension GenericCharacteristic: Equatable {
     public static func == (lhs: GenericCharacteristic, rhs: GenericCharacteristic) -> Bool {
         return lhs === rhs
+    }
+
+    internal var device: Device? {
+        return service?.accessory?.device
     }
 }

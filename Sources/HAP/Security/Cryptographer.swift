@@ -1,18 +1,27 @@
+import Logging
 import Foundation
 import HKDF
-import Evergreen
+import NIO
 
-fileprivate let logger = getLogger("hap.encryption")
+fileprivate let logger: Logger = {
+    var _logger = Logger(label: "hap.encryption")
+    _logger.logLevel = .warning
+    return _logger
+}()
 
-class UpgradeResponse: Response {
-    let cryptographer: Cryptographer
-    init(cryptographer: Cryptographer) {
-        self.cryptographer = cryptographer
-        super.init(status: .ok)
-    }
-}
-
+// 5.5.2 Session Security
+// (...)
+// Each HTTP message is split into frames no larger than 1024 bytes. Each frame has the following format:
+//
+//     <2:AAD for little endian length of encrypted data (n) in bytes>
+//     <n:encrypted data according to AEAD algorithm, up to 1024 bytes>
+//     <16:authTag according to AEAD algorithm>
 class Cryptographer {
+    enum Error: Swift.Error {
+        case invalidArgument
+        case indexOutOfBounds
+    }
+
     var encryptCount: UInt64 = 0
     var decryptCount: UInt64 = 0
     let decryptKey: Data
@@ -34,37 +43,20 @@ class Cryptographer {
         logger.debug("Encrypt key: \(self.encryptKey.hex)")
     }
 
-    func decrypt(_ data: Data) throws -> Data {
+    func decrypt(length: Int, cipher: inout ByteBuffer, message: inout ByteBuffer) throws {
+        logger.info("Decrypt message #\(self.decryptCount), length: \(length)")
         defer { decryptCount += 1 }
-
-        logger.debug("Decrypt message #\(self.decryptCount)")
-        logger.debug("Data: \(data.hex)")
-        guard data.count > 0 else {
-            logger.warning("No ciphertext")
-            return data
-        }
-
-        let length = Int(UInt16(data: Data(data[0..<2])))
-        precondition(length + 2 + 16 == data.count)
-
+        var lengthBytes = cipher.readSlice(length: 2)!
         let nonce = decryptCount.bigEndian.bytes
-        let encrypted = data[2..<(2 + length + 16)]
-        logger.debug("Ciphertext: \(encrypted.hex), Nonce: \(nonce.hex), Length: \(length)")
-
-        return try ChaCha20Poly1305.decrypt(cipher: Data(encrypted), additional: Data(data[0..<2]), nonce: nonce, key: decryptKey)
+        try ChaCha20Poly1305.decrypt(cipher: &cipher, additional: &lengthBytes, nonce: nonce, key: decryptKey, message: &message)
     }
 
-    func encrypt(_ data: Data) throws -> Data {
+    func encrypt(length: Int, plaintext: inout ByteBuffer, cipher: inout ByteBuffer) throws {
+        logger.info("Encrypt message #\(self.encryptCount), length: \(length)")
         defer { encryptCount += 1 }
-        logger.debug("Encrypt message #\(self.encryptCount)")
-
+        cipher.write(integer: Int16(length), endianness: Endianness.little, as: Int16.self)
+        let additional = cipher.viewBytes(at: 0, length: 2)
         let nonce = encryptCount.bigEndian.bytes
-        let length = UInt16(data.count).bigEndian.bytes
-        logger.debug("Message: \(data.hex), Nonce: \(nonce.hex), Length: \(length.hex)")
-
-        let encrypted = try ChaCha20Poly1305.encrypt(message: data, additional: length, nonce: nonce, key: encryptKey)
-        logger.debug("Cipher: \((length + encrypted).hex)")
-
-        return length + encrypted
+        try ChaCha20Poly1305.encrypt(message: &plaintext, additional: additional, nonce: nonce, key: encryptKey, cipher: &cipher)
     }
 }

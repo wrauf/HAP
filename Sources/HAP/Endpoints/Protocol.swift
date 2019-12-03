@@ -1,3 +1,4 @@
+// swiftlint:disable nesting
 import Foundation
 
 enum Protocol {
@@ -28,14 +29,14 @@ enum Protocol {
         var type: Bool
         var ev: Bool
         init(queryItems: [URLQueryItem]) throws {
-            guard let id = queryItems.first(where: {$0.name == "id"})?.value else {
+            guard let queryIds = queryItems.first(where: { $0.name == "id" })?.value else {
                 throw DecodeError.invalidPath
             }
-            paths = try id.components(separatedBy: ",").map(Path.init)
-            meta = queryItems.first(where: {$0.name == "meta"})?.value == "1"
-            perms = queryItems.first(where: {$0.name == "perms"})?.value == "1"
-            type = queryItems.first(where: {$0.name == "type"})?.value == "1"
-            ev = queryItems.first(where: {$0.name == "ev"})?.value == "1"
+            paths = try queryIds.components(separatedBy: ",").map(Path.init)
+            meta = queryItems.first(where: { $0.name == "meta" })?.value == "1"
+            perms = queryItems.first(where: { $0.name == "perms" })?.value == "1"
+            type = queryItems.first(where: { $0.name == "type" })?.value == "1"
+            ev = queryItems.first(where: { $0.name == "ev" })?.value == "1"
         }
     }
 
@@ -43,6 +44,7 @@ enum Protocol {
         case int(Int)
         case double(Double)
         case string(String)
+        case bool(Bool)
 
         enum DecodeError: Error {
             case unsupportedValueType
@@ -56,6 +58,8 @@ enum Protocol {
                 self = .double(double)
             } else if let string = try? container.decode(String.self) {
                 self = .string(string)
+            } else if let bool = try? container.decode(Bool.self) {
+                self = .bool(bool)
             } else {
                 throw DecodeError.unsupportedValueType
             }
@@ -70,6 +74,8 @@ enum Protocol {
                 try container.encode(double)
             case let .string(string):
                 try container.encode(string)
+            case let .bool(bool):
+                try container.encode(bool)
             }
         }
     }
@@ -77,20 +83,20 @@ enum Protocol {
     struct Characteristic: Codable {
         var aid: InstanceID
         var iid: InstanceID
-        var status: HAPStatusCodes? = nil
+        var status: HAPStatusCodes?
 
-        var value: Value? = nil
+        var value: Value?
 
-        var perms: [CharacteristicPermission]? = nil
+        var perms: [CharacteristicPermission]?
 
-        var unit: CharacteristicUnit? = nil
-        var type: CharacteristicType? = nil
-        var maxLen: Int? = nil
-        var maxValue: Double? = nil
-        var minValue: Double? = nil
-        var minStep: Double? = nil
+        var unit: CharacteristicUnit?
+        var type: CharacteristicType?
+        var maxLen: Int?
+        var maxValue: Double?
+        var minValue: Double?
+        var minStep: Double?
 
-        var ev: Bool? = nil
+        var ev: Bool?
 
         public init(aid: InstanceID, iid: InstanceID, value: Value? = nil, status: HAPStatusCodes? = nil) {
             self.aid = aid
@@ -98,7 +104,6 @@ enum Protocol {
             self.status = status
             self.value = value
         }
-
 
     }
 
